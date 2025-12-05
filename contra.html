@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Mini Contra – Map Dài & Quái Đứng Bắn</title>
+    <style>
+        body {
+            margin: 0;
+            background: #111;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: Arial, sans-serif;
+        }
+        #gameWrapper {
+            text-align: center;
+        }
+        canvas {
+            background: linear-gradient(#87ceeb, #5ab3ff);
+            border: 3px solid #fff;
+            display: block;
+            margin: 0 auto;
+        }
+        #info {
+            color: #fff;
+            margin-top: 8px;
+            font-size: 14px;
+        }
+        #info span {
+            margin: 0 6px;
+        }
+    </style>
+</head>
+<body>
+<div id="gameWrapper">
+    <canvas id="gameCanvas" width="900" height="450"></canvas>
+    <div id="info">
+        A/←, D/→: Di chuyển | W/↑: Nhảy | S/↓: Hướng | J: Bắn | 1-3: Đổi đạn | R: Chơi lại<br>
+        <span>Màn: <span id="level">1</span>/10</span> |
+        <span>Điểm: <span id="score">0</span></span> |
+        <span>HP: <span id="hpText">100 / 100</span></span> |
+        <span>Vũ khí: <span id="weaponName">Thường</span></span>
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+const scoreEl = document.getElementById("score");
+const levelEl = document.getElementById("level");
+const weaponNameEl = document.getElementById("weaponName");
+const hpTextEl = document.getElementById("hpText");
+
+const VIEW_WIDTH = canvas.width;
+const VIEW_HEIGHT = canvas.height;
+
+// Chiều dài map (lớn hơn khung hình)
+const WORLD_WIDTH = 3000;
+
+const GROUND_Y = 380;
+const GRAVITY = 0.7;
+const JUMP_STRENGTH = -13;
+
+// Người chơi dùng tọa độ "thế giới"
+const player = {
+    x: 50,
+    y: GROUND_Y - 40,
+    width: 30,
+    height: 40,
+    vx: 0,
+    vy: 0,
+    speed: 4,
+    onGround: true,
+    prevBottom: 0,
+    maxHp: 100,
+    hp: 100,
+};
+
+const bullets = [];        // đạn người chơi
+const enemyBullets = [];   // đạn quái
+const enemies = [];
+
+let score = 0;
+let gameOver = false;
+let currentLevel = 1;
+
+const keys = {};
+window.addEventListener("keydown", e => {
+    keys[e.key.toLowerCase()] = true;
+    if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," "].includes(e.key)) {
+        e.preventDefault();
+    }
+});
+window.addEventListener("keyup", e => {
+    keys[e.key.toLowerCase()] = false;
+});
+
+/* Vũ khí */
+let currentWeapon = 1; // 1: normal, 2: fast, 3: spread
+function updateWeaponFromKey() {
+    if (keys["1"]) currentWeapon = 1;
+    if (keys["2"]) currentWeapon = 2;
+    if (keys["3"]) currentWeapon = 3;
+    if (currentWeapon === 1) weaponNameEl.textContent = "Thường";
+    if (currentWeapon === 2) weaponNameEl.textContent = "Nhanh";
+    if (currentWeapon === 3) weaponNameEl.textContent = "Chùm";
+}
+
+/* Địa hình theo màn – dùng tọa độ thế giới */
+function makePlatformsForLevel(level) {
+    const platforms = [];
+
+    // Chia map thành 4 đoạn, mỗi đoạn ~700px
+    const segmentOffsets = [0, 700, 1400, 2100];
+
+    function addSegment(offset, type) {
+        if (type === 1) {
+            platforms.push({x: offset + 130, y: 320, width: 140, height: 15});
+            platforms.push({x: offset + 400, y: 340, width: 120, height: 15});
+        } else if (type === 2) {
+            platforms.push({x: offset + 260, y: 280, width: 120, height: 15});
+            platforms.push({x: offset + 620, y: 320, width: 140, height: 15});
+        } else if (type === 3) {
+            platforms.push({x: offset + 90,  y: 250, width: 100, height: 15});
+            platforms.push({x: offset + 350, y: 220, width: 120, height: 15});
+            platforms.push({x: offset + 600, y: 260, width: 120, height: 15});
+        } else if (type === 4) {
+            platforms.push({x: offset + 150, y: 310, width: 110, height: 15});
+            platforms.push({x: offset + 380, y: 280, width: 110, height: 15});
+            platforms.push({x: offset + 610, y: 310, width: 110, height: 15});
+        }
+    }
+
+    // Tùy level mà chọn pattern khác nhau
+    const patternForLevel = [
+        [1,2,3,4], // level 1
+        [2,3,4,1], // level 2
+        [3,4,1,2], // level 3
+        [4,1,2,3], // level 4
+        [1,3,2,4], // level 5
+        [2,4,3,1], // level 6
+        [3,1,4,2], // level 7
+        [4,2,1,3], // level 8
+        [1,4,3,2], // level 9
+        [2,1,4,3], // level 10
+    ];
+
+    const idx = Math.min(level - 1, patternForLevel.length - 1);
+    const pattern = patternForLevel[idx];
+
+    for (let i = 0; i < segmentOffsets.length; i++) {
+        addSegment(segmentOffsets[i], pattern[i]);
+    }
+
+    return platforms;
+}
+
+// boss ở màn 3, 6, 10
+function isBossLevel(level) {
+    return level === 3 || level === 6 || level === 10;
+}
+
+let currentPlatforms = [];
+
+/* Tạo màn */
+function setupLevel(level) {
+    enemies.length = 0;
+    bullets.length = 0;
+    enemyBullets.length = 0;
+
+    currentPlatforms = makePlatformsForLevel(level);
+
+    player.x = 50;
+    player.y = GROUND_Y - player.height;
+    player.vx = 0;
+    player.vy = 0;
+    player.onGround = true;
+    player.hp = player.maxHp;
+
+    const baseEnemyCount = 6 + level; // nhiều quái hơn vì map dài
+    for (let i = 0; i < baseEnemyCount; i++) {
+        spawnEnemy(false);
+    }
+
+    if (isBossLevel(level)) {
+        spawnEnemy(true); // boss ở cuối map
+    }
+
+    levelEl.textContent = level;
+    updateHpText();
+}
+
+/* Tạo quái – dùng tọa độ thế giới, rải khắp map */
+function spawnEnemy(isBoss) {
+    if (isBoss) {
+        const maxHp = 80 + currentLevel * 10;
+        const boss = {
+            x: WORLD_WIDTH - 220,           // gần cuối map
+            y: GROUND_Y - 80,
+            width: 60,
+            height: 80,
+            vx: 0,                          // boss tự di chuyển nhẹ trong AI
+            type: "boss",
+            hp: maxHp,
+            maxHp: maxHp,
+            shootCooldown: 0,
+            shootInterval: 60,
+        };
+        enemies.push(boss);
+    } else {
+        const h = 40;
+        const w = 30;
+        const baseHp = 20 + Math.floor(currentLevel / 2) * 5;
+        const enemy = {
+            x: 300 + Math.random() * (WORLD_WIDTH - 600), // tránh quá sát 0 & cuối
+            y: GROUND_Y - h,
+            width: w,
+            height: h,
+            vx: 0, // vận tốc được điều khiển bởi AI (chạy tới rồi đứng)
+            type: "normal",
+            hp: baseHp,
+            maxHp: baseHp,
+            shootCooldown: 0,
+            shootInterval: 120 - Math.min(70, currentLevel * 5),
+        };
+
+        // một số quái spawn trên platform
+        if (currentPlatforms.length && Math.random() < 0.4) {
+            const p = currentPlatforms[Math.floor(Math.random() * currentPlatforms.length)];
+            enemy.x = p.x + Math.random() * (p.width - w);
+            enemy.y = p.y - h;
+        }
+        enemies.push(enemy);
+    }
+}
+
+/* Bắn (người chơi) – tốc độ đạn chậm vừa */
+function shootPlayer() {
+    if (!shootPlayer.lastTime) shootPlayer.lastTime = 0;
+    const now = Date.now();
+    const delay = currentWeapon === 2 ? 150 : 230;
+    if (now - shootPlayer.lastTime < delay) return;
+    shootPlayer.lastTime = now;
+
+    // xác định hướng bắn
+    let dx = 0, dy = 0;
+    if (keys["arrowleft"] || keys["a"]) dx -= 1;
+    if (keys["arrowright"] || keys["d"]) dx += 1;
+    if (keys["arrowup"] || keys["w"]) dy -= 1;
+    if (keys["arrowdown"] || keys["s"]) dy += 1;
+
+    if (dx === 0 && dy === 0) {
+        dx = 1; dy = 0; // mặc định bắn sang phải
+    }
+
+    const len = Math.hypot(dx, dy);
+    dx /= len;
+    dy /= len;
+
+    const baseSpeed = currentWeapon === 2 ? 7 : 5.2;
+    const bulletSpeed = baseSpeed;
+
+    const originX = player.x + player.width / 2;
+    const originY = player.y + player.height / 2;
+
+    if (currentWeapon === 3) {
+        // đạn chùm 3 viên
+        const spreadAngle = 0.25;
+        for (let k = -1; k <= 1; k++) {
+            const angle = Math.atan2(dy, dx) + k * spreadAngle;
+            const vx = Math.cos(angle) * bulletSpeed;
+            const vy = Math.sin(angle) * bulletSpeed;
+            bullets.push({
+                x: originX,
+                y: originY,
+                width: 10,
+                height: 4,
+                vx,
+                vy,
+                damage: 8,
+            });
+        }
+    } else {
+        bullets.push({
+            x: originX,
+            y: originY,
+            width: 10,
+            height: 4,
+            vx: dx * bulletSpeed,
+            vy: dy * bulletSpeed,
+            damage: currentWeapon === 2 ? 7 : 6,
+        });
+    }
+}
+
+/* Bắn (quái) – tốc độ đạn chậm */
+function enemyShoot(enemy) {
+    const dx = player.x + player.width / 2 - (enemy.x + enemy.width / 2);
+    const dy = player.y + player.height / 2 - (enemy.y + enemy.height / 2);
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = dx / len;
+    const ny = dy / len;
+    const speed = enemy.type === "boss" ? 4.5 : 3.5;
+
+    enemyBullets.push({
+        x: enemy.x + enemy.width / 2,
+        y: enemy.y + enemy.height / 2,
+        width: 8,
+        height: 4,
+        vx: nx * speed,
+        vy: ny * speed,
+        damage: enemy.type === "boss" ? 15 : 8,
+    });
+}
+
+/* Reset game */
+function resetGame() {
+    score = 0;
+    currentLevel = 1;
+    gameOver = false;
+    player.hp = player.maxHp;
+    setupLevel(currentLevel);
+    scoreEl.textContent = score;
+}
+
+/* Collision helper */
+function isColliding(a, b) {
+    return !(
+        a.x + a.width < b.x ||
+        a.x > b.x + b.width ||
+        a.y + a.height < b.y ||
+        a.y > b.y + b.height
+    );
+}
+
+/* Cập nhật text HP */
+function updateHpText() {
+    hpTextEl.textContent = `${Math.max(0, Math.round(player.hp))} / ${player.maxHp}`;
+}
+
+/* Cập nhật logic */
+function update() {
+    if (gameOver) {
+        if (keys["r"]) resetGame();
+        return;
+    }
+
+    updateWeaponFromKey();
+
+    // Điều khiển ngang (trong world)
+    player.vx = 0;
+    if (keys["arrowleft"] || keys["a"]) player.vx = -player.speed;
+    if (keys["arrowright"] || keys["d"]) player.vx = player.speed;
+
+    // Nhảy
+    if ((keys["w"] || keys["arrowup"]) && player.onGround) {
+        player.vy = JUMP_STRENGTH;
+        player.onGround = false;
+    }
+
+    // Bắn
+    if (keys["j"]) shootPlayer();
+
+    // Cập nhật player
+    player.prevBottom = player.y + player.height;
+
+    player.x += player.vx;
+    player.y += player.vy;
+    player.vy += GRAVITY;
+
+    // giới hạn trong world
+    if (player.x < 0) player.x = 0;
+    if (player.x + player.width > WORLD_WIDTH) player.x = WORLD_WIDTH - player.width;
+
+    // va chạm ground
+    if (player.y + player.height >= GROUND_Y) {
+        player.y = GROUND_Y - player.height;
+        player.vy = 0;
+        player.onGround = true;
+    }
+
+    // va chạm platform (từ trên rơi xuống)
+    player.onGround = player.y + player.height >= GROUND_Y;
+    for (const p of currentPlatforms) {
+        const prevBottom = player.prevBottom;
+        const currBottom = player.y + player.height;
+        const top = p.y;
+        const horizontally =
+            player.x + player.width > p.x && player.x < p.x + p.width;
+        if (
+            horizontally &&
+            prevBottom <= top &&
+            currBottom >= top &&
+            player.vy >= 0
+        ) {
+            player.y = top - player.height;
+            player.vy = 0;
+            player.onGround = true;
+        }
+    }
+
+    // update bullets người chơi (trong world)
+    for (let i = bullets.length - 1; i >= 0; i--) {
+        const b = bullets[i];
+        b.x += b.vx;
+        b.y += b.vy;
+        if (
+            b.x > WORLD_WIDTH + 50 ||
+            b.x < -50 ||
+            b.y < -50 ||
+            b.y > VIEW_HEIGHT + 50
+        ) {
+            bullets.splice(i, 1);
+        }
+    }
+
+    // update đạn quái
+    for (let i = enemyBullets.length - 1; i >= 0; i--) {
+        const eb = enemyBullets[i];
+        eb.x += eb.vx;
+        eb.y += eb.vy;
+        if (
+            eb.x > WORLD_WIDTH + 50 ||
+            eb.x < -50 ||
+            eb.y < -50 ||
+            eb.y > VIEW_HEIGHT + 50
+        ) {
+            enemyBullets.splice(i, 1);
+        }
+    }
+
+    // update quái (AI: chạy tới rồi đứng lại bắn)
+    for (let i = enemies.length - 1; i >= 0; i--) {
+        const en = enemies[i];
+
+        // khoảng cách mong muốn để đứng lại bắn
+        const stopDist = en.type === "boss" ? 260 : 200;
+        const dxCenter =
+            (player.x + player.width / 2) - (en.x + en.width / 2);
+        const absDist = Math.abs(dxCenter);
+
+        // nếu xa hơn stopDist thì di chuyển gần lại, nếu gần hơn thì đứng yên
+        if (absDist > stopDist + 10) {
+            const dir = dxCenter > 0 ? 1 : -1;
+            const moveSpeed = en.type === "boss" ? 0.9 : 1.2;
+            en.vx = dir * moveSpeed;
+        } else if (absDist < stopDist - 10) {
+            const dir = dxCenter > 0 ? -1 : 1;
+            const moveSpeed = en.type === "boss" ? 0.7 : 1.0;
+            en.vx = dir * moveSpeed;
+        } else {
+            en.vx = 0; // trong vùng "đứng bắn"
+        }
+
+        en.x += en.vx;
+
+        // giữ enemy trong world
+        if (en.x < 0) en.x = 0;
+        if (en.x + en.width > WORLD_WIDTH) en.x = WORLD_WIDTH - en.width;
+
+        // giữ enemy trên ground (đơn giản)
+        const baseY = GROUND_Y - en.height;
+        if (en.y > baseY) en.y = baseY;
+
+        // bắn nếu ở khoảng nhìn thấy
+        en.shootCooldown = (en.shootCooldown || 0) + 1;
+        const interval = en.shootInterval || 110;
+        const distX = Math.abs(dxCenter);
+        if (en.shootCooldown >= interval && distX < 600 && !gameOver) {
+            enemyShoot(en);
+            en.shootCooldown = 0;
+        }
+    }
+
+    // đạn player trúng quái
+    for (let i = enemies.length - 1; i >= 0; i--) {
+        const en = enemies[i];
+        for (let j = bullets.length - 1; j >= 0; j--) {
+            const b = bullets[j];
+            if (isColliding(en, b)) {
+                bullets.splice(j, 1);
+                en.hp -= b.damage || 6;
+                if (en.hp <= 0) {
+                    score += en.type === "boss" ? 120 : 25;
+                    enemies.splice(i, 1);
+                }
+                break;
+            }
+        }
+    }
+
+    // đạn quái trúng người chơi
+    for (let i = enemyBullets.length - 1; i >= 0; i--) {
+        const eb = enemyBullets[i];
+        if (isColliding(eb, player)) {
+            enemyBullets.splice(i, 1);
+            player.hp -= eb.damage || 8;
+            if (player.hp <= 0) {
+                player.hp = 0;
+                gameOver = true;
+            }
+        }
+    }
+
+    // quái chạm trực tiếp người chơi
+    for (let i = enemies.length - 1; i >= 0; i--) {
+        const en = enemies[i];
+        if (isColliding(en, player)) {
+            player.hp -= 10;
+            enemies.splice(i, 1);
+            if (player.hp <= 0) {
+                player.hp = 0;
+                gameOver = true;
+            }
+        }
+    }
+
+    // Điều kiện qua màn:
+    // - Người chơi đi tới cuối map
+    // - Nếu là màn boss thì boss phải chết (có thể bỏ qua quái thường còn sót)
+    const bossAlive = enemies.some(e => e.type === "boss");
+    if (player.x >= WORLD_WIDTH - 150 && !bossAlive) {
+        if (currentLevel < 10) {
+            currentLevel++;
+            setupLevel(currentLevel);
+        } else {
+            gameOver = true;
+            gameOver.win = true;
+        }
+    }
+
+    scoreEl.textContent = score;
+    updateHpText();
+}
+
+/* Tính camera (cuộn map) */
+function getCameraX() {
+    let camX = player.x + player.width / 2 - VIEW_WIDTH / 2;
+    if (camX < 0) camX = 0;
+    if (camX > WORLD_WIDTH - VIEW_WIDTH) camX = WORLD_WIDTH - VIEW_WIDTH;
+    return camX;
+}
+
+/* Vẽ nền (dùng cameraX) */
+function drawBackground(cameraX) {
+    // vẽ núi đơn giản, trượt chậm hơn để giả parallax
+    const parallax = 0.5;
+    const offset = -cameraX * parallax;
+
+    ctx.fillStyle = "rgba(0,0,0,0.12)";
+    ctx.beginPath();
+    ctx.moveTo(offset + 60, GROUND_Y);
+    ctx.lineTo(offset + 230, 200);
+    ctx.lineTo(offset + 400, GROUND_Y);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(offset + 350, GROUND_Y);
+    ctx.lineTo(offset + 550, 180);
+    ctx.lineTo(offset + 800, GROUND_Y);
+    ctx.closePath();
+    ctx.fill();
+}
+
+/* Vẽ mặt đất & platform (theo camera) */
+function drawGround(cameraX) {
+    ctx.fillStyle = "#5b3c1f";
+    ctx.fillRect(-cameraX, GROUND_Y, WORLD_WIDTH, VIEW_HEIGHT - GROUND_Y);
+    ctx.fillStyle = "#3a8b3a";
+    ctx.fillRect(-cameraX, GROUND_Y - 10, WORLD_WIDTH, 10);
+}
+
+function drawPlatforms(cameraX) {
+    ctx.fillStyle = "#795548";
+    for (const p of currentPlatforms) {
+        const sx = p.x - cameraX;
+        if (sx + p.width < 0 || sx > VIEW_WIDTH) continue;
+        ctx.fillRect(sx, p.y, p.width, p.height);
+        ctx.fillStyle = "#4caf50";
+        ctx.fillRect(sx, p.y - 4, p.width, 4);
+        ctx.fillStyle = "#795548";
+    }
+}
+
+/* Vẽ người chơi */
+function drawPlayer(cameraX) {
+    const sx = player.x - cameraX;
+    ctx.fillStyle = "#ffeb3b";
+    ctx.fillRect(sx, player.y, player.width, player.height);
+    ctx.fillStyle = "#ffe082";
+    ctx.fillRect(sx + 5, player.y - 10, player.width - 10, 10);
+    ctx.fillStyle = "#616161";
+    ctx.fillRect(sx + player.width, player.y + 10, 15, 6);
+}
+
+/* Thanh máu người chơi (cố định trên màn hình) */
+function drawPlayerHpBar() {
+    const barWidth = 220;
+    const barHeight = 16;
+    const x = 20;
+    const y = 20;
+    const ratio = Math.max(0, player.hp) / player.maxHp;
+
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(x - 2, y - 2, barWidth + 4, barHeight + 4);
+
+    ctx.fillStyle = "#555";
+    ctx.fillRect(x, y, barWidth, barHeight);
+
+    ctx.fillStyle = "#4caf50";
+    ctx.fillRect(x, y, barWidth * ratio, barHeight);
+
+    ctx.strokeStyle = "#000";
+    ctx.strokeRect(x, y, barWidth, barHeight);
+}
+
+/* Vẽ đạn */
+function drawBullets(cameraX) {
+    ctx.fillStyle = "#ff5722";
+    for (const b of bullets) {
+        const sx = b.x - cameraX;
+        if (sx + b.width < 0 || sx > VIEW_WIDTH) continue;
+        ctx.fillRect(sx, b.y, b.width, b.height);
+    }
+}
+
+function drawEnemyBullets(cameraX) {
+    ctx.fillStyle = "#00e5ff";
+    for (const eb of enemyBullets) {
+        const sx = eb.x - cameraX;
+        if (sx + eb.width < 0 || sx > VIEW_WIDTH) continue;
+        ctx.fillRect(sx, eb.y, eb.width, eb.height);
+    }
+}
+
+/* Vẽ quái + thanh máu */
+function drawEnemies(cameraX) {
+    for (const en of enemies) {
+        const sx = en.x - cameraX;
+        if (sx + en.width < 0 || sx > VIEW_WIDTH) continue;
+
+        if (en.type === "boss") {
+            ctx.fillStyle = "#9c27b0";
+            ctx.fillRect(sx, en.y, en.width, en.height);
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(sx + 10, en.y + 10, 8, 8);
+        } else {
+            ctx.fillStyle = "#e91e63";
+            ctx.fillRect(sx, en.y, en.width, en.height);
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(sx + 5, en.y + 5, 5, 5);
+        }
+
+        // Thanh máu trên đầu quái
+        const barWidth = en.width;
+        const barHeight = 5;
+        const ratio = Math.max(0, en.hp) / en.maxHp;
+        const barX = sx;
+        const barY = en.y - 8;
+
+        ctx.fillStyle = "#555";
+        ctx.fillRect(barX, barY, barWidth, barHeight);
+        ctx.fillStyle = "#f44336";
+        ctx.fillRect(barX, barY, barWidth * ratio, barHeight);
+        ctx.strokeStyle = "#000";
+        ctx.strokeRect(barX, barY, barWidth, barHeight);
+    }
+}
+
+/* Vẽ Game Over */
+function drawGameOver() {
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
+    ctx.fillStyle = "#fff";
+    ctx.font = "32px Arial";
+    ctx.textAlign = "center";
+    if (gameOver.win) {
+        ctx.fillText("CHIẾN THẮNG! ĐÃ QUA 10 MÀN", VIEW_WIDTH / 2, VIEW_HEIGHT / 2 - 10);
+    } else {
+        ctx.fillText("GAME OVER", VIEW_WIDTH / 2, VIEW_HEIGHT / 2 - 10);
+    }
+    ctx.font = "18px Arial";
+    ctx.fillText("Nhấn R để chơi lại", VIEW_WIDTH / 2, VIEW_HEIGHT / 2 + 25);
+    ctx.textAlign = "left";
+}
+
+/* Game loop */
+function loop() {
+    update();
+    const cameraX = getCameraX();
+
+    ctx.clearRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
+    drawBackground(cameraX);
+    drawGround(cameraX);
+    drawPlatforms(cameraX);
+    drawPlayer(cameraX);
+    drawPlayerHpBar();
+    drawBullets(cameraX);
+    drawEnemyBullets(cameraX);
+    drawEnemies(cameraX);
+
+    if (gameOver) {
+        drawGameOver();
+    }
+
+    requestAnimationFrame(loop);
+}
+
+/* Start */
+resetGame();
+loop();
+</script>
+</body>
+</html>
